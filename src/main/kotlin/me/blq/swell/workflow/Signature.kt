@@ -1,8 +1,21 @@
 package me.blq.swell.workflow
 
+import com.fasterxml.jackson.annotation.JsonInclude
+import com.fasterxml.jackson.core.JsonGenerator
+import com.fasterxml.jackson.core.JsonParseException
+import com.fasterxml.jackson.core.JsonParser
+import com.fasterxml.jackson.core.TreeNode
+import com.fasterxml.jackson.databind.DeserializationContext
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.SerializerProvider
+import com.fasterxml.jackson.databind.annotation.JsonSerialize
+import com.fasterxml.jackson.databind.deser.std.StdDeserializer
+import com.fasterxml.jackson.databind.node.ArrayNode
+import com.fasterxml.jackson.databind.ser.std.StdSerializer
+import com.fasterxml.jackson.module.kotlin.jacksonTypeRef
 import com.fasterxml.jackson.module.kotlin.readValue
+import com.fasterxml.jackson.module.kotlin.treeToValue
 import java.time.ZonedDateTime
 import java.util.*
 import kotlin.reflect.KFunction
@@ -10,6 +23,7 @@ import kotlin.reflect.jvm.jvmErasure
 import kotlin.reflect.jvm.reflect
 
 
+@JsonInclude(JsonInclude.Include.NON_NULL)
 class SignatureProperties(
     val correlationId: String = UUID.randomUUID().toString(),
     val contentType: String = "application/json",
@@ -45,6 +59,7 @@ class SignatureProperties(
     }
 }
 
+@JsonInclude(JsonInclude.Include.NON_NULL)
 class SignatureHeaders(
     val lang: String = "java", // eg. java
     val task: String, // The task name
@@ -110,11 +125,16 @@ class SignatureHeaders(
     }
 }
 
+@JsonInclude(JsonInclude.Include.NON_NULL)
+@JsonSerialize(using = SignatureBodySerializer::class)
 class SignatureBody(
     val args: List<Any>,
 //    val kwargs: ObjectNode,
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
     val callbacks: List<Signature> = listOf(),
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
     val errCallbacks: List<Signature> = listOf(),
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
     val chain: List<Signature> = listOf(),
     val chord: Signature? = null
 ) {
@@ -150,6 +170,34 @@ class SignatureBody(
     }
 }
 
+class SignatureBodySerializer(t: Class<SignatureBody>) : StdSerializer<SignatureBody>(t) {
+    constructor() : this(SignatureBody::class.java)
+
+    override fun serialize(body: SignatureBody, gen: JsonGenerator, provider: SerializerProvider) {
+        gen.writeStartArray()
+        gen.writeObject(body.args)
+        gen.writeObject(mapOf<String, Any>())
+        gen.writeObject(mapOf(
+            "callbacks" to body.callbacks,
+            "errbacks" to body.errCallbacks,
+            "chain" to body.chain
+        ))
+        gen.writeEndArray()
+    }
+}
+
+class SignatureBodyDeserializer(private val objectMapper: ObjectMapper, t: Class<SignatureBody>) : StdDeserializer<SignatureBody>(t) {
+    override fun deserialize(p: JsonParser, ctxt: DeserializationContext): SignatureBody {
+        val arrNode = p.readValueAsTree<ArrayNode>()
+        if (arrNode.size() != 3) throw JsonParseException(p, "Signature body expected to have 3 elements.")
+
+        val args = objectMapper.treeToValue<List<Any>>(arrNode.get(0))
+        val callbacks = objectMapper.treeToValue<List<Signature>>(arrNode.get(1))
+        return SignatureBody(args, )
+    }
+}
+
+@JsonInclude(JsonInclude.Include.NON_NULL)
 class Signature (
     val body: SignatureBody,
     val headers: SignatureHeaders,
@@ -197,110 +245,3 @@ class Signature (
         return "Signature(body = $body, headers = $headers, properties = $properties)"
     }
 }
-
-fun task(
-    name: String,
-    vararg args: Any,
-    callbacks: List<Signature> = listOf(),
-    errCallbacks: List<Signature> = listOf(),
-    chain: List<Signature> = listOf()
-): Signature {
-    val body = SignatureBody(args.toMutableList(), callbacks, errCallbacks, chain, null)
-    val id = UUID.randomUUID().toString()
-    val headers = SignatureHeaders(id = id, task = name, rootId = id)
-    val properties = SignatureProperties(correlationId = id)
-    return Signature(body, headers, properties)
-}
-
-fun chain(
-    vararg tasks: Signature,
-    callbacks: List<Signature> = listOf(),
-    errCallbacks: List<Signature> = listOf()
-): Signature {
-    assert(tasks.isNotEmpty())
-
-    val rootId = tasks[0].headers.id
-
-    val tasksCbs = tasks.mapIndexed { idx, t ->
-        val cb = if (idx < tasks.size-1) {
-            listOf(tasks[idx+1]) // Each task will get the next task as its callback
-        } else {
-            callbacks // The last task will get the callbacks supplied to the chain
-        }
-
-        t.copy(
-            headers = t.headers.copy(rootId = rootId),
-            // All tasks must execute the error callbacks if they fail
-            body = t.body.copy(callbacks = cb, errCallbacks = errCallbacks)
-        )
-    }
-
-    return tasksCbs.first()
-
-
-    // Any task in the chain may fail, so they all need the error callbacks
-//    val tasksCbs = tasks.map {
-//        it.copy(
-//            headers = it.headers.copy(rootId = it.headers.rootId),
-//            body = it.body.copy(errCallbacks = errCallbacks)
-//        )
-//    }
-
-    // Last task gets the success callbacks
-//    val last = tasksCbs.last().let { it.copy(body = it.body.copy(callbacks = callbacks)) }
-//    return root.copy(body = root.body.copy(chain = tasksCbs.take(tasksCbs.size-1) + last))
-}
-
-/**
- * Signatures are the wire format for tasks.
- */
-//@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type", include = JsonTypeInfo.As.EXTERNAL_PROPERTY)
-//@JsonSubTypes(value = [
-//    JsonSubTypes.Type(value = DecodeTaskSignature::class, name = "task"),
-//    JsonSubTypes.Type(value = TaskSignature::class, name = "task")
-////    JsonSubTypes.Type(value = BarData.class, name = "group"),
-////    JsonSubTypes.Type(value = BarData.class, name = "chain")
-//])
-//abstract class BaseSignature(
-//    val type: String,
-//    val groupId: String?
-//)
-//
-//
-//abstract class BaseTaskSignature(
-//    val id: String,
-//    val taskName: String,
-//    groupId: String?
-//) : BaseSignature(type = "task", groupId = groupId)
-//
-//class TaskSignature(
-//    id: String,
-//    taskName: String,
-//    val taskArguments: List<Any>,
-//    groupId: String?
-//) : BaseTaskSignature(id = id, taskName = taskName, groupId = groupId)
-//
-//class DecodeTaskSignature(
-//    id: String,
-//    taskName: String,
-//    val taskArguments: List<JsonNode>,
-//    groupId: String?
-//) : BaseTaskSignature(id = id, taskName = taskName, groupId = groupId) {
-//
-//    fun toTask(objectMapper: ObjectMapper, taskFunc: Any): Task {
-//        val meth = taskFunc::class.java.methods[0] // Better way to get the method?
-//
-//        val args = meth.parameters.mapIndexed { idx, param ->
-//            if (idx > taskArguments.size) {
-//                param.type.newInstance() // Add zero value of the instance
-//            } else {
-//                objectMapper.treeToValue(taskArguments[idx], param.type)
-//            }
-//        }
-//
-//        return Task(taskFunc, *args.toTypedArray())
-//    }
-//
-//}
-//
-//
